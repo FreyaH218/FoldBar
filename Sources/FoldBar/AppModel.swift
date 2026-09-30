@@ -44,6 +44,7 @@ final class AppModel: ObservableObject {
     var onHideEntry: (MenuEntry) -> Void = { _ in }
     var onQuit: () -> Void = {}
     var onShow: () -> Void = {}
+    var layoutSummary: () -> String = { "" }
     var currentDivider: () -> CGRect? = { nil }
     var collapseSupported: Bool { ProcessInfo.processInfo.operatingSystemVersion.majorVersion < 27 }
     private var draggedEntry: MenuEntry?
@@ -81,15 +82,20 @@ final class AppModel: ObservableObject {
         capturingIcons = true
         let snapshot = entries
         iconTask = Task { @MainActor [weak self] in
-            let images = await NativeIconCapture.capture(snapshot)
-            guard let self else { return }
-            if !self.dragging {
-                let live = Set(self.entries.map(\.id))
-                self.nativeIcons = self.nativeIcons.filter { live.contains($0.key) }
-                for (id, image) in images where live.contains(id) { self.nativeIcons[id] = image }
+            let images = await NativeIconCapture.capture(snapshot) { [weak self] images in
+                self?.mergeIcons(images)
             }
+            guard let self else { return }
+            self.mergeIcons(images)
             self.capturingIcons = false
         }
+    }
+
+    private func mergeIcons(_ images: [String: NSImage]) {
+        guard !dragging else { return }
+        let live = Set(entries.map(\.id))
+        nativeIcons = nativeIcons.filter { live.contains($0.key) }
+        for (id, image) in images where live.contains(id) { nativeIcons[id] = image }
     }
 
     func grantIconPermission() {
@@ -97,12 +103,16 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
     }
 
-    func showIconDiagnostics() {
+    @MainActor func showIconDiagnostics() {
         let alert = NSAlert()
         alert.messageText = "原始图标读取状态"
         alert.informativeText = iconPermission
             ? "已读取 \(nativeIcons.count) / \(entries.count) 个原始菜单栏图标。\n图像仅保存在内存中，不录音、不写入文件、不上传。"
             : "请先允许叠栏读取原始菜单栏图标。"
+        alert.informativeText += "\n" + layoutSummary()
+        let missing = entries.filter { nativeIcons[$0.id] == nil }.map(\.name)
+        if !missing.isEmpty { alert.informativeText += "\n尚未读取原图：" + missing.joined(separator: "、") }
+        alert.informativeText += "\n" + NativeIconCapture.diagnostic
         alert.addButton(withTitle: "好")
         alert.runModal()
     }

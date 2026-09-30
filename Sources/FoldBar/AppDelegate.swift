@@ -48,8 +48,8 @@ final class GlobalHotKeys {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let model = AppModel()
     private var toggle: NSStatusItem!
+    private var concealer: NSStatusItem?
     private var controlButton: NSButton!
-    private var controlContainer: NSView!
     private let menuDropTarget = MenuBarDropTarget()
     private var layoutTask: Task<Void, Never>?
     private var layoutVerified = false
@@ -86,6 +86,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.onToggleBar = { [weak self] in self?.setCollapsed(!(self?.model.collapsed ?? false)) }
         model.onClose = { [weak self] in self?.hidePanel() }
         model.onShow = { [weak self] in self?.showPanel() }
+        model.layoutSummary = { [weak self] in
+            guard let self else { return "" }
+            guard self.model.collapsed else { return "原菜单栏已展开。" }
+            let height = NSScreen.screens.first?.frame.height ?? 0
+            let screens = NSScreen.screens.map { BarGeometry.quartzRect($0.frame, primaryHeight: height) }
+            let targets = self.model.entries.filter { !self.model.isShown($0) && !NativeMenuMover.isFixed($0) }
+            let offscreen = targets.filter { entry in
+                guard let frame = NativeMenuMover.frame(entry) else { return false }
+                return !screens.contains { $0.intersects(frame) }
+            }
+            let offscreenIDs = Set(offscreen.map(\.id))
+            let remaining = targets.filter { !offscreenIDs.contains($0.id) }.map(\.name)
+            let summary = "隐藏区 \(targets.count) 个项目，已移出屏幕 \(offscreen.count) 个。"
+            return remaining.isEmpty ? summary : summary + "\n尚未移出：" + remaining.joined(separator: "、")
+        }
         model.currentDivider = { [weak self] in
             guard let self, let control = self.toggle else { return nil }
             return self.nativeFrame(control)
@@ -129,26 +144,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func createStatusItems() {
         let defaults = UserDefaults.standard
         // Reuse the old boundary's saved order so existing visible items stay on its right.
-        let key = "NSStatusItem Preferred Position FoldBar.Divider"
-        if defaults.object(forKey: key) == nil { defaults.set(0, forKey: key) }
+        let key = "NSStatusItem Preferred Position FoldBar.Entry"
+        if defaults.object(forKey: key) == nil {
+            defaults.set(defaults.object(forKey: "NSStatusItem Preferred Position FoldBar.Divider") ?? 0, forKey: key)
+        }
         toggle = NSStatusBar.system.statusItem(withLength: 20)
-        toggle.autosaveName = "FoldBar.Divider"
+        toggle.autosaveName = "FoldBar.Entry"
         toggle.behavior = []
-        controlContainer = toggle.button!
-        toggle.button?.title = ""
-        toggle.button?.image = nil
-        toggle.button?.setAccessibilityElement(false)
-        controlButton = NSButton(frame: controlContainer.bounds)
-        controlButton.autoresizingMask = [.minXMargin, .height]
-        controlButton.isBordered = false
+        // macOS hosts status items remotely. Configure the real status button;
+        // custom subviews aren't a reliable visible or clickable menu-bar entry.
+        controlButton = toggle.button!
         controlButton.imagePosition = .imageOnly
-        controlButton.bezelStyle = .regularSquare
+        controlButton.imageScaling = .scaleNone
         controlButton.target = self
         controlButton.action = #selector(statusClicked)
         controlButton.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        controlContainer.addSubview(controlButton)
-        // One status item performs folding and displays the ellipsis at its right edge.
-        // There is no separate separator item or empty menu-bar slot.
         updateStatusImage()
     }
 
@@ -198,9 +208,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func setCollapsed(_ collapsed: Bool) {
         guard model.collapseSupported || !collapsed else { return }
         model.collapsed = collapsed
-        toggle.length = collapsed ? 4096 : 20
-        controlContainer.setFrameSize(NSSize(width: toggle.length, height: NSStatusBar.system.thickness))
-        controlButton.frame = NSRect(x: toggle.length - 20, y: 0, width: 20, height: NSStatusBar.system.thickness)
+        // The visible entry never expands. A separate invisible item exists only
+        // while folded; remove it completely on expansion, leaving no empty slot.
+        if collapsed, concealer == nil {
+            let defaults = UserDefaults.standard
+            let entryPosition = defaults.double(forKey: "NSStatusItem Preferred Position FoldBar.Entry")
+            // Choose the immediately adjacent order, not the next item's saved
+            // position: adding the entry's width can skip its left-hand neighbor.
+            defaults.set(entryPosition + 1, forKey: "NSStatusItem Preferred Position FoldBar.Concealer")
+            // Let the system place a narrow item beside the entry first. Creating
+            // an oversized item directly can cause the preferred slot to be ignored.
+            let item = NSStatusBar.system.statusItem(withLength: 1)
+            item.autosaveName = "FoldBar.Concealer"
+            item.behavior = []
+            item.button?.title = ""
+            item.button?.image = nil
+            item.button?.setAccessibilityElement(false)
+            concealer = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self, weak item] in
+                guard let self, let item, self.model.collapsed, self.concealer === item else { return }
+                item.length = 4096
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                    guard let self, self.model.collapsed else { return }
+                    if self.panel.isVisible { self.model.refresh() }
+                }
+            }
+        } else if !collapsed, let item = concealer {
+            NSStatusBar.system.removeStatusItem(item)
+            concealer = nil
+        }
         if !collapsed { lastExpanded = Date() }
         if !smokeTest { UserDefaults.standard.set(collapsed, forKey: "collapsed") }
         updateStatusImage()
@@ -210,17 +246,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateStatusImage() {
-        let symbol = "ellipsis"
-        controlButton?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "叠栏")
-        controlButton?.image?.isTemplate = true
-        controlButton?.toolTip = "叠栏 · 管理原生菜单栏图标 · ⌥⌘B"
-        controlButton?.setAccessibilityLabel("叠栏：管理原生菜单栏图标")
+        controlButton.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: "叠栏")
+        controlButton.image?.isTemplate = true
+        controlButton.title = ""
+        controlButton.toolTip = "叠栏 · 显示隐藏图标 · ⌥⌘B"
+        controlButton.setAccessibilityElement(true)
+        controlButton.setAccessibilityLabel("叠栏：显示隐藏图标")
+    }
+
+    private var visibleControlFrame: CGRect? {
+        guard let button = controlButton, let window = button.window else { return nil }
+        return window.convertToScreen(button.convert(button.bounds, to: nil))
     }
 
     private func nativeFrame(_ item: NSStatusItem) -> CGRect? {
-        guard let button = controlButton, let window = button.window else { return nil }
-        return BarGeometry.quartzRect(window.convertToScreen(button.convert(button.bounds, to: nil)),
-                                      primaryHeight: NSScreen.screens.first?.frame.height ?? 0)
+        guard let frame = visibleControlFrame else { return nil }
+        return BarGeometry.quartzRect(frame, primaryHeight: NSScreen.screens.first?.frame.height ?? 0)
     }
 
     private func beginMenuBarDrag(_ entry: MenuEntry) {
@@ -306,10 +347,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let desired = model.panelSize
         let size = CGSize(width: min(desired.width, screen.frame.width - 24), height: min(desired.height, screen.frame.height - inset - 36))
         var anchor = CGPoint(x: screen.frame.midX, y: screen.frame.maxY)
-        if let button = controlButton, let window = button.window {
-            let rect = window.convertToScreen(button.convert(button.bounds, to: nil))
-            if screen.frame.contains(rect) { anchor.x = rect.midX }
-        }
+        if let rect = visibleControlFrame, screen.frame.contains(rect) { anchor.x = rect.midX }
         let origin = BarGeometry.panelOrigin(anchor: anchor, size: size, screen: screen.frame, topInset: inset)
         if panel.frame.size != size {
             host.rootView = AnyView(ShelfView(model: model).frame(width: size.width, height: size.height))
@@ -348,7 +386,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         actionGeneration += 1
         setCollapsed(false)
         NSStatusBar.system.removeStatusItem(toggle)
-        UserDefaults.standard.set(0, forKey: "NSStatusItem Preferred Position FoldBar.Divider")
+        UserDefaults.standard.set(0, forKey: "NSStatusItem Preferred Position FoldBar.Entry")
         createStatusItems()
         layoutVerified = false
         model.nativeLayoutStatus = "布局已恢复，直接把图标拖到顶部菜单栏。"
@@ -411,6 +449,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
         observerTokens.forEach { NotificationCenter.default.removeObserver($0); NSWorkspace.shared.notificationCenter.removeObserver($0) }
         // Remove our own items so the original icons regain their space immediately.
+        if let concealer { NSStatusBar.system.removeStatusItem(concealer) }
         if let toggle { NSStatusBar.system.removeStatusItem(toggle) }
     }
 
@@ -427,14 +466,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.captureOwnView(to: output + "/foldbar-permission.png")
             self.setCollapsed(true)
-            report["collapsedLength"] = self.toggle.length
+            report["collapsedEntryLength"] = self.toggle.length
+            report["concealerLength"] = self.concealer?.length ?? 0
             report["collapseState"] = self.model.collapsed
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                report["dividerWindowWidthCollapsed"] = self.controlContainer.window?.frame.width ?? 0
+                report["entryWindowWidthCollapsed"] = self.controlButton.window?.frame.width ?? 0
                 report["toggleFrameX"] = self.controlButton?.window?.frame.minX ?? -1
                 self.setCollapsed(false)
                 self.model.tab = 1
-                report["expandedRestored"] = self.toggle.length == 30 && !self.model.collapsed
+                report["expandedRestored"] = self.toggle.length == 20 && self.concealer == nil && !self.model.collapsed
                 report["runningApps"] = self.model.applications.count
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     self.captureOwnView(to: output + "/foldbar-apps.png")

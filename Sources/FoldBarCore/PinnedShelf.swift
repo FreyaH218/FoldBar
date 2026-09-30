@@ -12,6 +12,13 @@ public struct MenuItemReference: Codable, Equatable, Identifiable {
         identifier.isEmpty ? "title:\(title):\(occurrence)" : "identifier:\(identifier):\(occurrence)"
     }
 
+    /// A live menu keeps its icon when AX proxies or hosted windows are recreated.
+    /// Keep processes separate, and ignore a changing title only for a sole item.
+    public func runtimeID(processID: Int32) -> String {
+        let menu = identifier.isEmpty && wasOnlyItem ? "single" : id
+        return "process:\(processID)/menu:\(menu)"
+    }
+
     public init(identifier: String, title: String, occurrence: Int, wasOnlyItem: Bool) {
         self.identifier = identifier
         self.title = title

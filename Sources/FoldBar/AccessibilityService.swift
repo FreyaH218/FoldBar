@@ -38,7 +38,6 @@ private struct RawEntry {
     let element: AXUIElement
     let actions: [String]
     let frame: CGRect?
-    let identity: String
     let identifier: String
 }
 
@@ -111,8 +110,7 @@ final class AccessibilityService {
                             .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? ""
                         let itemID = Self.string(item, kAXIdentifierAttribute) ?? ""
                         raw.append(RawEntry(pid: app.pid, title: String(title.prefix(100)), element: item,
-                                            actions: actions, frame: Self.frame(item),
-                                            identity: "\(app.pid):\(itemID):\(CFHash(item))", identifier: itemID))
+                                            actions: actions, frame: Self.frame(item), identifier: itemID))
                     }
                 }
             }
@@ -134,7 +132,7 @@ final class AccessibilityService {
                     let label = counts[item.pid, default: 0] > 1 && !title.isEmpty ? title : name
                     let pin = PinnedApplication(name: label, bundleID: app.bundleID,
                                                 bundlePath: app.bundlePath, menuItem: reference)
-                    return MenuEntry(id: item.identity, pid: item.pid, name: name, detail: detail,
+                    return MenuEntry(id: reference.runtimeID(processID: item.pid), pid: item.pid, name: name, detail: detail,
                                      icon: app.icon, element: item.element, actions: item.actions, frame: item.frame,
                                      obscured: item.frame.map { BarGeometry.isObscured($0, screens: screens, notches: notches) } ?? true,
                                      pinReference: pin)
@@ -174,7 +172,7 @@ final class AccessibilityService {
                                                  occurrence: 0, wasOnlyItem: windows.filter { $0.pid == window.pid }.count == 1)
                     let pin = ax?.pinReference ?? PinnedApplication(name: title, bundleID: app?.bundleID ?? "",
                         bundlePath: app?.bundlePath, menuItem: menu)
-                    actual.append(MenuEntry(id: "window:\(window.id)", pid: ax?.pid ?? window.pid, name: title,
+                    actual.append(MenuEntry(id: ax?.id ?? "window:\(window.pid):\(window.id)", pid: ax?.pid ?? window.pid, name: title,
                         detail: "原生菜单栏项目", icon: app?.icon ?? NSImage(systemSymbolName: "menubar.rectangle", accessibilityDescription: nil)!,
                         element: ax?.element, windowID: window.id, windowPID: window.pid, actions: ax?.actions ?? [], frame: ax?.frame ?? window.frame,
                         obscured: BarGeometry.isObscured(ax?.frame ?? window.frame, screens: screens, notches: notches), pinReference: pin))

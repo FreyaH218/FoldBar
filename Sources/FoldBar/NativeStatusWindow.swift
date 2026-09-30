@@ -26,7 +26,7 @@ struct NativeStatusWindow {
             let rect = MenuWindowBridge.frame(id) ?? fallback
             let title = info[kCGWindowName as String] as? String ?? ""
             // Transient drag previews and our own hosted control aren't applications.
-            guard title != "System Status Item Clone", title != "FoldBar.Divider", title != "FoldBar.Toggle" else { return nil }
+            guard title != "System Status Item Clone", title != "FoldBar.Divider", title != "FoldBar.Toggle", title != "FoldBar.Entry", title != "FoldBar.Concealer" else { return nil }
             guard
                   rect.width > 1, rect.width < 800, rect.height > 1, rect.height < 90 else { return nil }
             return NativeStatusWindow(id: id, pid: pid, frame: rect,

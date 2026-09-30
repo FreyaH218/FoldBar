@@ -108,7 +108,7 @@ struct ShelfView: View {
             Button("图标读取状态…") { model.showIconDiagnostics() }
             Button("恢复菜单栏布局", action: model.onReset)
             Divider()
-            Text("叠栏 1.5 · ⌥⌘B 打开图标条")
+            Text("叠栏 1.5.1 · ⌥⌘B 打开图标条")
             Button("关闭图标条", action: model.onClose)
             Button("退出叠栏", action: model.onQuit)
         } label: {
