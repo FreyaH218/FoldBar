@@ -135,6 +135,7 @@ final class AccessibilityService {
                                      pinReference: pin)
                 }
                 let windows = NativeStatusWindow.all()
+                let windowCounts = Dictionary(grouping: windows, by: \.pid).mapValues(\.count)
                 var remaining = entries
                 var actual: [MenuEntry] = []
                 for window in windows {
@@ -143,9 +144,13 @@ final class AccessibilityService {
                         guard let frame = remaining[index].frame else { return false }
                         return abs(frame.minX - window.frame.minX) < 3 && abs(frame.width - window.frame.width) < 6
                     }
-                    let matched = exact ?? (peers.count == 1 ? peers.first : nil)
+                    let matched = exact ?? (peers.count == 1 && windowCounts[window.pid] == 1 ? peers.first : nil)
                     let ax = matched.map { remaining.remove(at: $0) }
                     let app = byPID[window.pid]
+                    // Control Center owns background status windows as well as live controls.
+                    // Only expose its windows when backed by an actual AX menu item; keep
+                    // unmatched, valid AX entries below so clipped system controls still appear.
+                    if ["com.apple.controlcenter", "com.apple.systemuiserver"].contains(app?.bundleID ?? ""), ax == nil { continue }
                     let title = ax?.name ?? (window.title.isEmpty ? (app?.name ?? window.owner) : window.title)
                     let menu = MenuItemReference(identifier: "native-window:\(window.id)", title: window.title,
                                                  occurrence: 0, wasOnlyItem: windows.filter { $0.pid == window.pid }.count == 1)

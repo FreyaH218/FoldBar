@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import Carbon
 import FoldBarCore
+import Combine
 
 final class ShelfPanel: NSPanel {
     override var canBecomeKey: Bool { true }
@@ -52,6 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var layoutVerified = false
     private var panel: ShelfPanel!
     private var host: NSHostingView<AnyView>!
+    private var sizeObservation: AnyCancellable?
     private let hotKeys = GlobalHotKeys()
     private var permissionTimer: Timer?
     private var collapseTimer: Timer?
@@ -73,6 +75,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         createStatusItems()
         createPanel()
+        sizeObservation = model.objectWillChange
+            .debounce(for: .milliseconds(60), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self, self.panel.isVisible else { return }
+                self.positionPanel()
+            }
         model.onToggleBar = { [weak self] in self?.setCollapsed(!(self?.model.collapsed ?? false)) }
         model.onClose = { [weak self] in self?.hidePanel() }
         model.onShow = { [weak self] in self?.showPanel() }
@@ -141,7 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func createPanel() {
-        panel = ShelfPanel(contentRect: NSRect(x: 0, y: 0, width: 440, height: 650),
+        panel = ShelfPanel(contentRect: NSRect(origin: .zero, size: model.panelSize),
                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.title = "叠栏 FoldBar"
         panel.isFloatingPanel = true
@@ -152,7 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
-        host = NSHostingView(rootView: AnyView(ShelfView(model: model).frame(width: 440, height: 650)))
+        host = NSHostingView(rootView: AnyView(ShelfView(model: model).frame(width: model.panelSize.width, height: model.panelSize.height)))
         host.sizingOptions = []
         panel.contentView = host
     }
@@ -173,9 +181,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showContextMenu() {
         let menu = NSMenu()
         let items: [(String, Selector)] = [
-            ("显示所有项目…", #selector(openShelfMenu)),
+            ("显示隐藏图标", #selector(openShelfMenu)),
             (model.collapsed ? "展开原菜单栏" : "收起原菜单栏", #selector(toggleOriginalBar)),
-            ("设置…", #selector(openSettingsMenu)),
+            ("整理图标…", #selector(openSettingsMenu)),
             ("恢复分隔线位置", #selector(resetFromMenu))
         ]
         for (title, selector) in items { let item = menu.addItem(withTitle: title, action: selector, keyEquivalent: ""); item.target = self }
@@ -200,7 +208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateStatusImage() {
-        let symbol = panel?.isVisible == true ? "chevron.up" : "chevron.down"
+        let symbol = "ellipsis"
         toggle.length = 30
         toggle.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "叠栏")
         toggle.button?.image?.isTemplate = true
@@ -272,18 +280,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func positionPanel() {
         let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main ?? NSScreen.screens[0]
+        let screen = (panel.isVisible ? panel.screen : nil) ?? NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main ?? NSScreen.screens[0]
         let inset = max(screen.safeAreaInsets.top, NSStatusBar.system.thickness)
-        let size = CGSize(width: min(440, screen.frame.width - 24), height: min(650, screen.frame.height - inset - 36))
+        let desired = model.panelSize
+        let size = CGSize(width: min(desired.width, screen.frame.width - 24), height: min(desired.height, screen.frame.height - inset - 36))
         var anchor = CGPoint(x: screen.frame.midX, y: screen.frame.maxY)
         if let button = toggle.button, let window = button.window {
             let rect = window.convertToScreen(button.convert(button.bounds, to: nil))
             if screen.frame.contains(rect) { anchor.x = rect.midX }
         }
         let origin = BarGeometry.panelOrigin(anchor: anchor, size: size, screen: screen.frame, topInset: inset)
-        host.rootView = AnyView(ShelfView(model: model).frame(width: size.width, height: size.height))
-        panel.contentMinSize = size
-        panel.contentMaxSize = size
+        if panel.frame.size != size {
+            host.rootView = AnyView(ShelfView(model: model).frame(width: size.width, height: size.height))
+            panel.contentMinSize = .zero
+            panel.contentMaxSize = screen.frame.size
+        }
         panel.setFrame(CGRect(origin: origin, size: size), display: true)
     }
 

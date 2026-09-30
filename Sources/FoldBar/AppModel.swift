@@ -17,6 +17,7 @@ final class AppModel: ObservableObject {
     @Published var query = ""
     @Published var tab = 0
     @Published var settings = false
+    @Published var searching = false
     @Published var notice: String?
     @Published var lastScanned: Date?
     @Published var shortcutAvailable = true
@@ -46,6 +47,28 @@ final class AppModel: ObservableObject {
     }
     var shownEntries: [MenuEntry] { entries.filter(isShown) }
     var filteredEntries: [MenuEntry] { entries.filter { ItemSearch.matches(query, name: $0.name, detail: $0.detail) } }
+    var hiddenEntries: [MenuEntry] { filteredEntries.filter { !isShown($0) } }
+    var barEntries: [MenuEntry] { searching ? filteredEntries : hiddenEntries }
+    var feedback: String? {
+        if let notice { return notice }
+        return nativeLayoutStatus.hasPrefix("未移动") || nativeLayoutStatus.hasPrefix("请先") ? nativeLayoutStatus : nil
+    }
+    var panelSize: CGSize {
+        let count = max(barEntries.count, settings ? shownEntries.count : 0)
+        let width = trusted ? min(720, max(settings || searching ? 400 : 260, CGFloat(count) * 44 + 68)) : 340
+        return CGSize(width: width, height: 52 + (settings && trusted ? 104 : 0) + (searching && trusted ? 44 : 0) + (feedback != nil ? 36 : 0))
+    }
+
+    func activate(_ entry: MenuEntry) {
+        guard !applyingNativeLayout else { return }
+        if entry.canOpenMenu { onOpenEntry(entry) }
+        else { onPlaceEntry(entry, nil) }
+    }
+
+    func dismissFeedback() {
+        notice = nil
+        if feedback != nil { nativeLayoutStatus = "" }
+    }
 
     func dragProvider(for entry: MenuEntry) -> NSItemProvider {
         draggedEntry = entry

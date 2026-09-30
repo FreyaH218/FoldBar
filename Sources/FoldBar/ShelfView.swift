@@ -1,130 +1,109 @@
 import SwiftUI
 
+/// The everyday surface is one row. Arrangement and search are opt-in.
 struct ShelfView: View {
     @ObservedObject var model: AppModel
     @State private var hiddenTargeted = false
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "rectangle.stack.fill").font(.system(size: 23)).foregroundStyle(Color.accentColor)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("叠栏").font(.system(size: 20, weight: .semibold))
-                    Text("把被遮挡的原图标拖出来").font(.system(size: 11)).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button { model.settings.toggle() } label: { Image(systemName: model.settings ? "arrow.left" : "gearshape") }
-                    .buttonStyle(.plain).accessibilityLabel(model.settings ? "返回菜单栏项目" : "设置")
-                Button(action: model.onClose) { Image(systemName: "xmark") }
-                    .buttonStyle(.plain).accessibilityLabel("关闭面板")
-            }.padding(20)
-            Divider().padding(.horizontal, 20)
-            if model.settings { settingsPage } else { menuPage }
-            HStack {
-                Text("⌥⌘B 随时打开")
-                Spacer()
-                Text("FOLDBAR")
-            }.font(.system(size: 10)).foregroundStyle(.tertiary).padding(16)
+            if model.settings && model.trusted {
+                PinnedShelfView(model: model)
+                Divider().padding(.horizontal, 14)
+            }
+            if model.searching && model.trusted { searchField }
+            HStack(spacing: 4) {
+                if !model.trusted { permissionPrompt }
+                else if model.barEntries.isEmpty { emptyState }
+                else { MenuIconStrip(entries: model.barEntries, model: model) }
+                Rectangle().fill(.primary.opacity(0.12)).frame(width: 1, height: 22).padding(.horizontal, 3)
+                if model.applyingNativeLayout {
+                    ProgressView().controlSize(.small).frame(width: 36, height: 40).help(model.nativeLayoutStatus)
+                } else { settingsMenu }
+            }
+            .padding(.horizontal, 10).frame(height: 52)
+            .background(Color.accentColor.opacity(hiddenTargeted ? 0.12 : 0))
+            .onDrop(of: [.foldBarApplication], isTargeted: $hiddenTargeted) { model.acceptDrop($0, hide: true) }
+            if model.settings && model.trusted {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.up.arrow.down")
+                    Text(hiddenTargeted ? "松开，收回隐藏区" : "向上拖常驻 · 拖回这里隐藏 · 左右拖排序")
+                    Spacer(minLength: 0)
+                }.font(.system(size: 10)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 16).frame(height: 26, alignment: .top)
+            }
+            if let feedback = model.feedback {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.circle").foregroundStyle(.orange)
+                    Text(feedback).lineLimit(1).help(feedback)
+                    Spacer(minLength: 0)
+                    Button(action: model.dismissFeedback) { Image(systemName: "xmark") }
+                        .buttonStyle(.plain).accessibilityLabel("关闭提示")
+                }.font(.system(size: 11)).padding(.horizontal, 16).frame(height: 36)
+            }
         }
         .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 18))
-        .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(.primary.opacity(0.1)))
-        .onExitCommand { model.onClose() }
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(.primary.opacity(0.24), lineWidth: 0.75))
+        .onExitCommand {
+            if model.searching { model.searching = false; model.query = "" }
+            else if model.settings { model.settings = false }
+            else { model.onClose() }
+        }
     }
 
-    private var menuPage: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Text(model.collapsed ? "隐藏区已收起" : "原菜单栏已展开").font(.system(size: 11)).foregroundStyle(.secondary)
-                Spacer()
-                Button(model.collapsed ? "临时展开全部" : "收起隐藏区", action: model.onToggleBar)
-                    .font(.system(size: 11)).buttonStyle(.bordered)
-                    .disabled(model.applyingNativeLayout || !model.collapseSupported)
-            }
-            PinnedShelfView(model: model)
-            HStack {
-                Text("菜单栏项目 · \(model.entries.count)").font(.system(size: 12, weight: .semibold))
-                Spacer()
-                Button { model.refresh() } label: {
-                    if model.scanning { ProgressView().controlSize(.small) }
-                    else { Image(systemName: "arrow.clockwise") }
-                }.buttonStyle(.plain).disabled(model.scanning || model.applyingNativeLayout).accessibilityLabel("刷新菜单栏项目")
-            }
-            TextField("搜索菜单栏图标…", text: $model.query).textFieldStyle(.roundedBorder)
-                .accessibilityLabel("搜索菜单栏图标")
-            if !model.trusted {
-                VStack(alignment: .leading, spacing: 10) {
-                    Label("读取和移动原图标需要辅助功能", systemImage: "lock")
-                    Button("开启辅助功能") { model.grantPermission() }
-                }.font(.system(size: 12)).padding(14).frame(maxWidth: .infinity, alignment: .leading)
-                Spacer()
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 5) {
-                        ForEach(model.filteredEntries) { entry in row(entry) }
-                        if model.filteredEntries.isEmpty {
-                            Text(model.scanning ? "正在识别菜单栏项目…" : "未找到匹配的菜单栏项目")
-                                .font(.system(size: 12)).foregroundStyle(.secondary).padding(24)
-                        }
-                    }
-                }
-                .background(Color.accentColor.opacity(hiddenTargeted ? 0.08 : 0))
-                .onDrop(of: [.foldBarApplication], isTargeted: $hiddenTargeted) { model.acceptDrop($0, hide: true) }
-                Text("拖入显示区后显示原图标；拖回列表收起。")
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
-            }
-            if let notice = model.notice { Text(notice).font(.system(size: 11)).foregroundStyle(.secondary) }
-        }.padding(20)
-    }
-
-    private func row(_ entry: MenuEntry) -> some View {
+    private var permissionPrompt: some View {
         HStack(spacing: 10) {
-            Image(systemName: "line.3.horizontal").font(.system(size: 10)).foregroundStyle(.tertiary)
-            Image(nsImage: entry.icon).resizable().frame(width: 27, height: 27)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(entry.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                Text(model.isShown(entry) ? "顶部已显示" : (entry.obscured ? "被遮挡 · 可拖入显示区" : "隐藏区 · 可拖入显示区"))
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 4)
-            Button {
-                if model.isShown(entry) { model.onHideEntry(entry) }
-                else { model.onPlaceEntry(entry, nil) }
-            } label: { Image(systemName: model.isShown(entry) ? "arrow.down.circle" : "arrow.up.circle").font(.system(size: 18)) }
-                .buttonStyle(.plain).disabled(model.applyingNativeLayout)
-                .accessibilityLabel("\(model.isShown(entry) ? "隐藏" : "显示")\(entry.name)的原图标")
-        }
-        .padding(10)
-        .background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
-        .contentShape(Rectangle())
-        .onDrag { model.dragProvider(for: entry) }
-        .contextMenu {
-            Button("显示到顶部") { model.onPlaceEntry(entry, nil) }
-            Button("收回隐藏区") { model.onHideEntry(entry) }
-            if entry.canOpenMenu { Button("打开原菜单") { model.onOpenEntry(entry) } }
-        }
+            Image(systemName: "menubar.rectangle").font(.system(size: 21)).foregroundStyle(.secondary)
+            Button("允许访问菜单栏") { model.grantPermission() }.buttonStyle(.plain).font(.system(size: 13))
+            Spacer(minLength: 0)
+        }.padding(.leading, 6).help("开启辅助功能，读取和移动原生菜单栏图标")
     }
 
-    private var settingsPage: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                Text("从下方拖入显示区，显示应用原本的菜单栏图标。显示区按真实位置排列；拖到某项前面即可换序。拖回下方列表或右键可隐藏。")
-                Text("时钟、控制中心等系统固定控件可能无法移动。没有菜单栏图标的应用不会加入此列表。移动未成功时会保留展开并提示原因。")
-                    .foregroundStyle(.secondary)
-                Divider()
-                Toggle("临时展开 20 秒后收起", isOn: $model.autoCollapse)
-                Toggle("登录 Mac 时启动", isOn: Binding(get: { model.loginEnabled }, set: model.toggleLogin))
-                Divider()
-                Text("⌥⌘B：打开面板\n⇧⌥⌘B：收起 / 展开隐藏区\n⌘ 拖动顶部原图标：手动调整位置")
-                Label(model.trusted ? "辅助功能已开启" : "辅助功能未开启", systemImage: model.trusted ? "checkmark.circle" : "lock")
-                Button("辅助功能设置") { model.grantPermission() }
-                Button("恢复分隔线位置", action: model.onReset)
-                Divider()
-                Text("叠栏 1.3 · 本地开发验证版").fontWeight(.semibold)
-                Text("原图标移动兼容性仍在验证。面板图片用于识别项目；顶部由原应用绘制。无网络请求。")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                Button("退出叠栏", action: model.onQuit)
-            }.font(.system(size: 12)).padding(20)
-        }
+    private var emptyState: some View {
+        HStack(spacing: 9) {
+            if model.scanning { ProgressView().controlSize(.small) }
+            else { Image(systemName: model.searching ? "magnifyingglass" : "checkmark.circle").foregroundStyle(.secondary) }
+            Text(model.scanning ? "正在读取图标…" : (model.searching ? "没有匹配的图标" : "没有隐藏的图标"))
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+        }.padding(.leading, 8)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("搜索全部菜单栏项目", text: $model.query).textFieldStyle(.plain)
+                .focused($searchFocused).accessibilityLabel("搜索菜单栏图标")
+            Button { model.searching = false; model.query = "" } label: {
+                Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+            }.buttonStyle(.plain).accessibilityLabel("关闭搜索")
+        }.font(.system(size: 12)).padding(.horizontal, 17).frame(height: 44)
+            .onAppear { searchFocused = true }
+    }
+
+    private var settingsMenu: some View {
+        Menu {
+            Button(model.settings ? "完成整理" : "整理图标") { model.settings.toggle() }.disabled(!model.trusted)
+            Button(model.searching ? "关闭搜索" : "搜索图标…") {
+                model.searching.toggle(); if !model.searching { model.query = "" }
+            }.disabled(!model.trusted)
+            Button("刷新图标") { model.refresh() }.disabled(model.scanning)
+            Divider()
+            Button(model.collapsed ? "临时展开原菜单栏" : "收起隐藏区", action: model.onToggleBar).disabled(!model.collapseSupported)
+            Toggle("临时展开 20 秒后收起", isOn: $model.autoCollapse)
+            Toggle("登录 Mac 时启动", isOn: Binding(get: { model.loginEnabled }, set: model.toggleLogin))
+            Divider()
+            Button("辅助功能设置…") { model.grantPermission() }
+            Button("恢复分隔线位置", action: model.onReset)
+            Divider()
+            Text("叠栏 1.4 · ⌥⌘B 打开图标条")
+            Button("关闭图标条", action: model.onClose)
+            Button("退出叠栏", action: model.onQuit)
+        } label: {
+            Image(systemName: "gearshape").font(.system(size: 20, weight: .regular)).frame(width: 36, height: 40)
+        }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .accessibilityLabel("叠栏设置").help("整理图标与设置")
     }
 }

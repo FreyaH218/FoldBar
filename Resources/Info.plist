@@ -6,14 +6,14 @@
     <key>CFBundleName</key><string>FoldBar</string>
     <key>CFBundleDisplayName</key><string>叠栏</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.3.0</string>
-    <key>CFBundleVersion</key><string>4</string>
+    <key>CFBundleShortVersionString</key><string>1.4.0</string>
+    <key>CFBundleVersion</key><string>5</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
-    <key>NSAccessibilityUsageDescription</key><string>叠栏通过辅助功能读取菜单栏项目，并在你点击时打开对应菜单。</string>
+    <key>NSAccessibilityUsageDescription</key><string>叠栏通过辅助功能读取、移动原生菜单栏图标，并在你点击时打开对应菜单。</string>
     <key>UTExportedTypeDeclarations</key><array><dict>
         <key>UTTypeIdentifier</key><string>local.foldbar.application-reference</string>
         <key>UTTypeDescription</key><string>FoldBar application reference</string>
