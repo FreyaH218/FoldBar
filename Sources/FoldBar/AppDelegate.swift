@@ -52,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controlButton: NSButton!
     private let menuDropTarget = MenuBarDropTarget()
     private var layoutTask: Task<Void, Never>?
+    private var startupTask: Task<Void, Never>?
     private var layoutVerified = false
     private var panel: ShelfPanel!
     private var host: NSHostingView<AnyView>!
@@ -83,7 +84,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self, self.panel.isVisible, !self.model.dragging else { return }
                 self.positionPanel()
             }
-        model.onToggleBar = { [weak self] in self?.setCollapsed(!(self?.model.collapsed ?? false)) }
+        model.onToggleBar = { [weak self] in
+            self?.startupTask?.cancel()
+            self?.setCollapsed(!(self?.model.collapsed ?? false))
+        }
         model.onClose = { [weak self] in self?.hidePanel() }
         model.onShow = { [weak self] in self?.showPanel() }
         model.layoutSummary = { [weak self] in
@@ -131,13 +135,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         collapseTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             self?.autoCollapseIfNeeded()
         }
-        // Let the system restore saved status-item positions before any width changes.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+        // Warm the original icons while their surfaces are available, then start
+        // folded. Do not open the shelf automatically during a normal launch.
+        startupTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
             guard let self else { return }
             if self.smokeTest { self.runSmokeTest(); return }
-            self.setCollapsed(false)
             self.model.nativeLayoutStatus = "直接把图标拖到屏幕顶部菜单栏，松手即可显示"
-            self.showPanel()
+            self.model.refresh()
+            // A slow/unresponsive menu must not prevent the default folded state.
+            for _ in 0..<50 {
+                if !self.model.scanning && !self.model.capturingIcons { break }
+                do { try await Task.sleep(nanoseconds: 100_000_000) } catch { return }
+            }
+            guard !Task.isCancelled, !self.model.dragging, !self.model.applyingNativeLayout else { return }
+            self.setCollapsed(true)
+            if !self.model.trusted || !self.model.iconPermission { self.showPanel() }
         }
     }
 
@@ -383,6 +396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func resetPositions() {
+        startupTask?.cancel()
         actionGeneration += 1
         setCollapsed(false)
         NSStatusBar.system.removeStatusItem(toggle)
@@ -411,6 +425,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observerTokens.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main) { [weak self] _ in
                 guard let self else { return }
+                self.startupTask?.cancel()
                 self.actionGeneration += 1
                 self.menuDropTarget.hide()
                 self.layoutVerified = false
@@ -443,6 +458,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         actionGeneration += 1
         menuDropTarget.hide()
         layoutTask?.cancel()
+        startupTask?.cancel()
         permissionTimer?.invalidate()
         collapseTimer?.invalidate()
         if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
