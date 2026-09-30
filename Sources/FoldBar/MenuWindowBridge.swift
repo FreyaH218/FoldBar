@@ -8,6 +8,7 @@ enum MenuWindowBridge {
     private static let library = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY)
     private typealias Connection = @convention(c) () -> Int32
     private typealias List = @convention(c) (Int32, Int32, Int32, UnsafeMutablePointer<UInt32>, UnsafeMutablePointer<Int32>) -> Int32
+    private typealias Capture = @convention(c) (Int32, UnsafeMutablePointer<UInt32>, Int32, UInt32) -> Unmanaged<CFArray>?
     private typealias Bounds = @convention(c) (Int32, UInt32, UnsafeMutablePointer<CGRect>) -> Int32
 
     private static func symbol<T>(_ name: String, as: T.Type) -> T? {
@@ -31,6 +32,20 @@ enum MenuWindowBridge {
         }
         guard let array else { return nil }
         return CGWindowListCreateDescriptionFromArray(array) as? [[String: Any]]
+    }
+
+    /// Restricted to a caller-validated status window and an explicit screen permission.
+    static func image(_ id: CGWindowID) -> CGImage? {
+        guard CGPreflightScreenCaptureAccess(),
+              let connection = symbol("CGSMainConnectionID", as: Connection.self),
+              let capture = symbol("SLSHWCaptureWindowList", as: Capture.self) else { return nil }
+        var window = id
+        guard let images = capture(connection(), &window, 1, 0)?.takeRetainedValue(),
+              CFArrayGetCount(images) == 1,
+              let pointer = CFArrayGetValueAtIndex(images, 0) else { return nil }
+        let value = Unmanaged<CFTypeRef>.fromOpaque(pointer).takeUnretainedValue()
+        guard CFGetTypeID(value) == CGImage.typeID else { return nil }
+        return (value as! CGImage)
     }
 
     static func frame(_ id: CGWindowID) -> CGRect? {

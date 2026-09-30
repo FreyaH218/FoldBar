@@ -35,9 +35,9 @@ import FoldBarCore
         }
     }
 
-    static func frame(_ entry: MenuEntry) -> CGRect? {
+    nonisolated static func frame(_ entry: MenuEntry) -> CGRect? {
         let windows = NativeStatusWindow.all()
-        if let id = entry.windowID, let window = windows.first(where: { $0.id == id && $0.pid == entry.pid }) { return window.frame }
+        if let id = entry.windowID, let window = windows.first(where: { $0.id == id && $0.pid == (entry.windowPID ?? entry.pid) }) { return window.frame }
         let peers = windows.filter { $0.pid == entry.pid }
         if entry.pinReference?.menuItem?.wasOnlyItem == true, peers.count == 1 { return peers[0].frame }
         guard let element = entry.element else { return nil }
@@ -54,7 +54,7 @@ import FoldBarCore
     }
 
     // macOS reserves these controls. Their presence must never be reported as hidden.
-    static func isFixed(_ entry: MenuEntry) -> Bool {
+    nonisolated static func isFixed(_ entry: MenuEntry) -> Bool {
         guard entry.pinReference?.bundleID == "com.apple.controlcenter" ||
               entry.pinReference?.bundleID == "com.apple.systemuiserver" else { return false }
         let id = entry.pinReference?.menuItem?.identifier.lowercased() ?? ""
@@ -62,10 +62,10 @@ import FoldBarCore
             ["控制中心", "Control Center", "时钟", "Clock"].contains(entry.name)
     }
 
-    func place(_ entry: MenuEntry, before target: @escaping () -> CGRect?) async throws {
+    func place(_ entry: MenuEntry, onRight: Bool = false, before target: @escaping () -> CGRect?) async throws {
         guard AXIsProcessTrusted(), CGPreflightPostEventAccess() else { throw Failure("请先开启辅助功能。") }
         guard !Self.isFixed(entry) else { throw Failure("此项目的位置由 macOS 固定。") }
-        try await move(entry, toRight: false, divider: target)
+        try await move(entry, toRight: onRight, divider: target)
         guard let frame = Self.frame(entry), isVisible(frame) else { throw Failure("原图标仍被遮挡，尚未显示到菜单栏。") }
     }
 
@@ -98,22 +98,20 @@ import FoldBarCore
         }
         let destination = CGPoint(x: toRight ? boundary.maxX - 1 : boundary.minX + 1, y: boundary.midY)
 
-        // AppKit's status-item tracking supports a window-addressed Command press followed
-        // by release at the insertion boundary. Never post the offscreen source globally.
+        // Address only the original status window; no events enter the global HID stream.
         if let window {
-            try await sendDrag(entry, window: window, from: CGPoint(x: 20_000, y: 20_000),
-                               to: destination, directed: true)
+            try await sendDrag(entry, window: window, from: CGPoint(x: original.midX, y: original.midY),
+                               to: destination)
             if try await waitForPosition(entry, divider: divider, onRight: toRight) { return }
         }
-        // Visible items can also use an ordinary Command-drag with an explicit modifier
-        // key state. Re-read the position because a previous attempt may have shifted it.
-        if let current = Self.frame(entry), isVisible(current), let currentTarget = divider(), isVisible(currentTarget) {
-            let start = CGPoint(x: current.midX, y: current.midY)
-            let finish = CGPoint(x: toRight ? currentTarget.maxX - 1 : currentTarget.minX + 1, y: currentTarget.midY)
-            try await sendDrag(entry, window: window, from: start, to: finish, directed: false)
+        // Some status windows only respond through the system event stream. Use one
+        // insertion event with the cursor hidden, never an animated horizontal sweep.
+        if let current = Self.frame(entry), isVisible(current), let target = divider(), isVisible(target) {
+            try await insertWithoutPointerAnimation(from: CGPoint(x: current.midX, y: current.midY),
+                to: CGPoint(x: toRight ? target.maxX - 1 : target.minX + 1, y: target.midY))
             if try await waitForPosition(entry, divider: divider, onRight: toRight) { return }
         }
-        throw Failure("macOS 没有把“\(entry.name)”的原图标移到目标位置。")
+        throw Failure("macOS 没有确认“\(entry.name)”的原图标位置。")
     }
 
     private func waitForPosition(_ entry: MenuEntry, divider: () -> CGRect?, onRight: Bool) async throws -> Bool {
@@ -125,51 +123,80 @@ import FoldBarCore
         return false
     }
 
-    private func sendDrag(_ entry: MenuEntry, window: CGWindowID?, from: CGPoint, to: CGPoint, directed: Bool) async throws {
-        guard let source = CGEventSource(stateID: .privateState),
+    private func sendDrag(_ entry: MenuEntry, window: CGWindowID, from: CGPoint, to: CGPoint) async throws {
+        // NSEvent supplies the target window number used by AppKit's dispatcher.
+        // Pointer-position metadata alone does not route events to that window.
+        func make(_ type: NSEvent.EventType, at point: CGPoint, flags: NSEvent.ModifierFlags) -> CGEvent? {
+            guard let event = NSEvent.mouseEvent(with: type, location: .zero, modifierFlags: flags,
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: Int(window), context: nil,
+                eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)?.cgEvent else { return nil }
+            event.location = point
+            event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(entry.windowPID ?? entry.pid))
+            event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(window))
+            event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(window))
+            return event
+        }
+        guard let down = make(.leftMouseDown, at: from, flags: .command),
+              let drag = make(.leftMouseDragged, at: to, flags: .command),
+              let up = make(.leftMouseUp, at: to, flags: []) else {
+            throw Failure("无法创建原图标移动事件。")
+        }
+        func send(_ event: CGEvent) { event.postToPid(entry.windowPID ?? entry.pid) }
+        var released = false
+        defer { if !released { send(up) } }
+        send(down)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        send(drag)
+        try await Task.sleep(nanoseconds: 80_000_000)
+        send(up)
+        released = true
+    }
+
+    private func insertWithoutPointerAnimation(from: CGPoint, to: CGPoint) async throws {
+        try await waitForRelease()
+        guard let source = CGEventSource(stateID: .privateState), let pointer = CGEvent(source: nil)?.location,
               let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: from, mouseButton: .left),
+              let drag = CGEvent(mouseEventSource: source, mouseType: .leftMouseDragged, mouseCursorPosition: to, mouseButton: .left),
               let up = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: to, mouseButton: .left),
-              let commandDown = CGEvent(keyboardEventSource: source, virtualKey: 55, keyDown: true),
-              let commandUp = CGEvent(keyboardEventSource: source, virtualKey: 55, keyDown: false) else {
-            throw Failure("无法创建原图标拖动事件。")
+              let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 55, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 55, keyDown: false) else {
+            throw Failure("无法创建原图标移动事件。")
+        }
+        guard CGDisplayHideCursor(CGMainDisplayID()) == .success else {
+            throw Failure("无法完成无轨迹移动，已取消。")
         }
         down.flags = .maskCommand
-        up.flags = []
         down.setIntegerValueField(.mouseEventClickState, value: 1)
-        commandDown.flags = .maskCommand
-        commandUp.flags = []
-        func send(_ event: CGEvent) {
-            if directed, let window {
-                event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(window))
-                event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(window))
-                event.postToPid(entry.pid)
-            } else { event.post(tap: .cghidEventTap) }
-        }
-        if !directed { commandDown.post(tap: .cghidEventTap) }
-        var buttonReleased = false
+        drag.flags = .maskCommand
+        up.flags = []
+        keyDown.flags = .maskCommand
+        keyUp.flags = []
+        var lastPoint = from
+        var finished = false
         defer {
-            if !buttonReleased { send(up) }
-            if !directed { commandUp.post(tap: .cghidEventTap) }
-        }
-        send(down)
-        try await Task.sleep(nanoseconds: 180_000_000)
-        if !directed {
-            for step in 1...12 {
-                let fraction = CGFloat(step) / 12
-                let position = CGPoint(x: from.x + (to.x - from.x) * fraction, y: from.y + (to.y - from.y) * fraction)
-                if let drag = CGEvent(mouseEventSource: source, mouseType: .leftMouseDragged, mouseCursorPosition: position, mouseButton: .left) {
-                    drag.flags = .maskCommand
-                    send(drag)
-                }
-                try await Task.sleep(nanoseconds: 25_000_000)
+            if !finished { up.location = lastPoint; up.post(tap: .cghidEventTap) }
+            keyUp.post(tap: .cghidEventTap)
+            // Don't undo a fresh physical mouse movement during this short operation.
+            if let current = CGEvent(source: nil)?.location, hypot(current.x - lastPoint.x, current.y - lastPoint.y) < 3 {
+                CGWarpMouseCursorPosition(pointer)
             }
+            CGDisplayShowCursor(CGMainDisplayID())
         }
-        send(up)
-        buttonReleased = true
+        keyDown.post(tap: .cghidEventTap)
+        down.post(tap: .cghidEventTap)
+        try await Task.sleep(nanoseconds: 80_000_000)
+        if let current = CGEvent(source: nil)?.location, hypot(current.x - from.x, current.y - from.y) >= 3 {
+            throw Failure("检测到新的鼠标操作，已取消移动。")
+        }
+        lastPoint = to
+        drag.post(tap: .cghidEventTap)
+        try await Task.sleep(nanoseconds: 60_000_000)
+        up.post(tap: .cghidEventTap)
+        finished = true
     }
 
     private func windowID(for entry: MenuEntry, frame: CGRect) -> CGWindowID? {
-        let candidates = NativeStatusWindow.all().filter { $0.pid == entry.pid }
+        let candidates = NativeStatusWindow.all().filter { $0.pid == (entry.windowPID ?? entry.pid) }
         if let id = entry.windowID, candidates.contains(where: { $0.id == id }) { return id }
         return candidates.first { abs($0.frame.minX - frame.minX) < 3 && abs($0.frame.width - frame.width) < 6 }?.id
     }

@@ -36,13 +36,13 @@ struct MenuIconStrip: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let overflow = CGFloat(entries.count) * 44 > geometry.size.width
+            let overflow = model.stripWidth(entries) > geometry.size.width
             let step = max(1, Int((geometry.size.width - (overflow ? 44 : 0)) / 44))
             ScrollViewReader { proxy in
                 HStack(spacing: 0) {
                     if overflow { pagingButton("chevron.left", label: "前一组图标", delta: -step, proxy: proxy) }
                     ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 4) {
+                        HStack(spacing: 2) {
                             ForEach(entries) { entry in
                                 if acceptsReordering {
                                     MenuIconButton(entry: entry, model: model)
@@ -73,51 +73,9 @@ struct MenuIconStrip: View {
 struct MenuIconButton: View {
     let entry: MenuEntry
     @ObservedObject var model: AppModel
-    @State private var hovering = false
 
     var body: some View {
-        Button { model.activate(entry) } label: {
-            Group {
-                if let symbol = entry.shelfSymbol {
-                    Image(systemName: symbol).font(.system(size: 21, weight: .regular)).foregroundStyle(.primary)
-                } else {
-                    Image(nsImage: entry.icon).resizable().interpolation(.high).scaledToFit().frame(width: 25, height: 25)
-                }
-            }
-                .frame(width: 40, height: 40)
-                .background(.primary.opacity(hovering ? 0.09 : 0), in: RoundedRectangle(cornerRadius: 10))
-                .contentShape(Rectangle())
-        }.buttonStyle(.plain).disabled(model.applyingNativeLayout)
-            .onHover { hovering = $0 }
-            .help(entry.name + (entry.canOpenMenu ? " · 打开原菜单" : " · 显示原图标"))
-            .accessibilityLabel(entry.name)
-            .accessibilityValue(model.isShown(entry) ? "常驻菜单栏" : "隐藏项目")
-            .onDrag { model.dragProvider(for: entry) }
-            .contextMenu {
-                if entry.canOpenMenu { Button("打开原菜单") { model.onOpenEntry(entry) } }
-                if model.isShown(entry) { Button("收回隐藏区") { model.onHideEntry(entry) } }
-                else { Button("常驻菜单栏") { model.onPlaceEntry(entry, nil) } }
-                Button("整理图标…") { model.settings = true }
-            }
-    }
-}
-
-private extension MenuEntry {
-    // System controls share one application icon; distinguish them in the editor.
-    // These are labels for the real items, not replacement status items in macOS.
-    var shelfSymbol: String? {
-        guard pinReference?.bundleID.hasPrefix("com.apple.") == true else { return nil }
-        let text = (name + " " + (pinReference?.menuItem?.identifier ?? "")).lowercased()
-        if text.contains("wi") && text.contains("fi") { return "wifi" }
-        if text.contains("电池") || text.contains("battery") { return "battery.100percent" }
-        if text.contains("时钟") || text.contains("clock") { return "clock" }
-        if text.contains("专注") || text.contains("focus") { return "moon" }
-        if text.contains("播放") || text.contains("nowplaying") { return "play.circle" }
-        if text.contains("音频") || text.contains("视频") { return "video" }
-        if text.contains("声音") || text.contains("sound") { return "speaker.wave.2" }
-        if text.contains("textinput") { return "character.cursor.ibeam" }
-        if text.contains("聚焦") || text.contains("spotlight") { return "magnifyingglass" }
-        if text.contains("控制中心") || text.contains("controlcenter") { return "switch.2" }
-        return nil
+        DraggableMenuIcon(entry: entry, model: model)
+            .frame(width: max(20, model.iconSize(entry).width), height: 40)
     }
 }

@@ -24,6 +24,7 @@ struct MenuEntry: Identifiable {
     let icon: NSImage
     let element: AXUIElement?
     var windowID: CGWindowID? = nil
+    var windowPID: pid_t? = nil
     let actions: [String]
     let frame: CGRect?
     let obscured: Bool
@@ -45,6 +46,10 @@ private struct RawEntry {
 /// This reader uses AX only; NativeMenuMover handles user-requested Command-drag layout changes.
 final class AccessibilityService {
     private let queue = DispatchQueue(label: "local.foldbar.accessibility", qos: .userInitiated)
+    // AX and WindowServer report different coordinates for off-screen hosted items.
+    // Retain only associations established while a unique geometric match existed.
+    // Accessed solely in the main-queue completion below; process IDs guard reuse.
+    private var hostedAssociations: [String: (window: CGWindowID, owner: pid_t)] = [:]
 
     static var trusted: Bool { AXIsProcessTrusted() }
 
@@ -136,30 +141,43 @@ final class AccessibilityService {
                 }
                 let windows = NativeStatusWindow.all()
                 let windowCounts = Dictionary(grouping: windows, by: \.pid).mapValues(\.count)
+                let liveIDs = Set(entries.map(\.id))
+                self.hostedAssociations = self.hostedAssociations.filter { liveIDs.contains($0.key) }
                 var remaining = entries
                 var actual: [MenuEntry] = []
                 for window in windows {
+                    let associated = remaining.indices.filter { index in
+                        guard let saved = self.hostedAssociations[remaining[index].id] else { return false }
+                        return saved.window == window.id && saved.owner == window.pid
+                    }
                     let peers = remaining.indices.filter { remaining[$0].pid == window.pid }
                     let exact = peers.first { index in
                         guard let frame = remaining[index].frame else { return false }
                         return abs(frame.minX - window.frame.minX) < 3 && abs(frame.width - window.frame.width) < 6
                     }
-                    let matched = exact ?? (peers.count == 1 && windowCounts[window.pid] == 1 ? peers.first : nil)
+                    // On macOS 26, Control Center can host another application's
+                    // status window. Attribute only a unique, geometrically matching AX item.
+                    let hosted = byPID[window.pid]?.bundleID == "com.apple.controlcenter"
+                        ? MenuWindowGeometry.uniqueItem(in: remaining.map(\.frame), hostedBy: window.frame) : nil
+                    let matched = (associated.count == 1 ? associated.first : nil) ?? exact ?? hosted ??
+                        (peers.count == 1 && windowCounts[window.pid] == 1 ? peers.first : nil)
                     let ax = matched.map { remaining.remove(at: $0) }
-                    let app = byPID[window.pid]
+                    if let ax { self.hostedAssociations[ax.id] = (window.id, window.pid) }
+                    let windowApp = byPID[window.pid]
+                    let app = byPID[ax?.pid ?? window.pid]
                     // Control Center owns background status windows as well as live controls.
                     // Only expose its windows when backed by an actual AX menu item; keep
                     // unmatched, valid AX entries below so clipped system controls still appear.
-                    if ["com.apple.controlcenter", "com.apple.systemuiserver"].contains(app?.bundleID ?? ""), ax == nil { continue }
+                    if ["com.apple.controlcenter", "com.apple.systemuiserver"].contains(windowApp?.bundleID ?? ""), ax == nil { continue }
                     let title = ax?.name ?? (window.title.isEmpty ? (app?.name ?? window.owner) : window.title)
                     let menu = MenuItemReference(identifier: "native-window:\(window.id)", title: window.title,
                                                  occurrence: 0, wasOnlyItem: windows.filter { $0.pid == window.pid }.count == 1)
                     let pin = ax?.pinReference ?? PinnedApplication(name: title, bundleID: app?.bundleID ?? "",
                         bundlePath: app?.bundlePath, menuItem: menu)
-                    actual.append(MenuEntry(id: "window:\(window.id)", pid: window.pid, name: title,
+                    actual.append(MenuEntry(id: "window:\(window.id)", pid: ax?.pid ?? window.pid, name: title,
                         detail: "原生菜单栏项目", icon: app?.icon ?? NSImage(systemSymbolName: "menubar.rectangle", accessibilityDescription: nil)!,
-                        element: ax?.element, windowID: window.id, actions: ax?.actions ?? [], frame: window.frame,
-                        obscured: BarGeometry.isObscured(window.frame, screens: screens, notches: notches), pinReference: pin))
+                        element: ax?.element, windowID: window.id, windowPID: window.pid, actions: ax?.actions ?? [], frame: ax?.frame ?? window.frame,
+                        obscured: BarGeometry.isObscured(ax?.frame ?? window.frame, screens: screens, notches: notches), pinReference: pin))
                 }
                 // Retain real AX items omitted by the public window list, including notch-clipped items.
                 // Zero-frame Control Center placeholders are not actual menu-bar icons.

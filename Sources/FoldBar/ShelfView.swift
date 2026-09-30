@@ -15,6 +15,7 @@ struct ShelfView: View {
             if model.searching && model.trusted { searchField }
             HStack(spacing: 4) {
                 if !model.trusted { permissionPrompt }
+                else if !model.iconPermission { iconPermissionPrompt }
                 else if model.barEntries.isEmpty { emptyState }
                 else { MenuIconStrip(entries: model.barEntries, model: model) }
                 Rectangle().fill(.primary.opacity(0.12)).frame(width: 1, height: 22).padding(.horizontal, 3)
@@ -28,7 +29,7 @@ struct ShelfView: View {
             if model.settings && model.trusted {
                 HStack(spacing: 6) {
                     Image(systemName: "arrow.up.arrow.down")
-                    Text(hiddenTargeted ? "松开，收回隐藏区" : "向上拖常驻 · 拖回这里隐藏 · 左右拖排序")
+                    Text(hiddenTargeted ? "松开，收回隐藏区" : "直接拖到屏幕顶部显示 · 拖回这里隐藏")
                     Spacer(minLength: 0)
                 }.font(.system(size: 10)).foregroundStyle(.secondary)
                     .padding(.horizontal, 16).frame(height: 26, alignment: .top)
@@ -46,6 +47,7 @@ struct ShelfView: View {
         .background(.regularMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(.primary.opacity(0.24), lineWidth: 0.75))
+        .onChange(of: model.dragging) { if !$0 { hiddenTargeted = false } }
         .onExitCommand {
             if model.searching { model.searching = false; model.query = "" }
             else if model.settings { model.settings = false }
@@ -59,6 +61,12 @@ struct ShelfView: View {
             Button("允许访问菜单栏") { model.grantPermission() }.buttonStyle(.plain).font(.system(size: 13))
             Spacer(minLength: 0)
         }.padding(.leading, 6).help("开启辅助功能，读取和移动原生菜单栏图标")
+    }
+
+    private var iconPermissionPrompt: some View {
+        Button("允许读取原始菜单栏图标") { model.grantIconPermission() }
+            .buttonStyle(.plain).font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 6).help("仅截取菜单栏项目的静态图像，保留原图标及原始尺寸")
     }
 
     private var emptyState: some View {
@@ -85,7 +93,7 @@ struct ShelfView: View {
 
     private var settingsMenu: some View {
         Menu {
-            Button(model.settings ? "完成整理" : "整理图标") { model.settings.toggle() }.disabled(!model.trusted)
+            Button(model.settings ? "完成整理" : "管理常驻图标") { model.settings.toggle() }.disabled(!model.trusted)
             Button(model.searching ? "关闭搜索" : "搜索图标…") {
                 model.searching.toggle(); if !model.searching { model.query = "" }
             }.disabled(!model.trusted)
@@ -96,14 +104,16 @@ struct ShelfView: View {
             Toggle("登录 Mac 时启动", isOn: Binding(get: { model.loginEnabled }, set: model.toggleLogin))
             Divider()
             Button("辅助功能设置…") { model.grantPermission() }
-            Button("恢复分隔线位置", action: model.onReset)
+            Button("原始图标读取权限…") { model.grantIconPermission() }
+            Button("图标读取状态…") { model.showIconDiagnostics() }
+            Button("恢复菜单栏布局", action: model.onReset)
             Divider()
-            Text("叠栏 1.4 · ⌥⌘B 打开图标条")
+            Text("叠栏 1.5 · ⌥⌘B 打开图标条")
             Button("关闭图标条", action: model.onClose)
             Button("退出叠栏", action: model.onQuit)
         } label: {
             Image(systemName: "gearshape").font(.system(size: 20, weight: .regular)).frame(width: 36, height: 40)
         }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-            .accessibilityLabel("叠栏设置").help("整理图标与设置")
+            .accessibilityLabel("叠栏设置").help("管理常驻图标与设置")
     }
 }

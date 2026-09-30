@@ -13,6 +13,10 @@ final class AppModel: ObservableObject {
     @Published var applications: [AppRecord] = []
     @Published var trusted = AccessibilityService.trusted
     @Published var scanning = false
+    @Published var iconPermission = NativeIconCapture.permitted
+    @Published var nativeIcons: [String: NSImage] = [:]
+    @Published var capturingIcons = false
+    private var iconTask: Task<Void, Never>?
     @Published var collapsed = false
     @Published var query = ""
     @Published var tab = 0
@@ -25,8 +29,9 @@ final class AppModel: ObservableObject {
     @Published var autoCollapse = UserDefaults.standard.object(forKey: "autoCollapse") as? Bool ?? true {
         didSet { UserDefaults.standard.set(autoCollapse, forKey: "autoCollapse") }
     }
-    @Published var nativeLayoutStatus = "把下方被隐藏的图标拖入显示区"
+    @Published var nativeLayoutStatus = "直接把图标拖到屏幕顶部菜单栏"
     @Published var applyingNativeLayout = false
+    @Published var dragging = false
     @Published var dividerFrame: CGRect?
     let service = AccessibilityService()
     var onToggleBar: () -> Void = {}
@@ -34,6 +39,8 @@ final class AppModel: ObservableObject {
     var onReset: () -> Void = {}
     var onOpenEntry: (MenuEntry) -> Void = { _ in }
     var onPlaceEntry: (MenuEntry, MenuEntry?) -> Void = { _, _ in }
+    var onDragBegan: (MenuEntry) -> Void = { _ in }
+    var onDragEnded: () -> Void = {}
     var onHideEntry: (MenuEntry) -> Void = { _ in }
     var onQuit: () -> Void = {}
     var onShow: () -> Void = {}
@@ -54,9 +61,50 @@ final class AppModel: ObservableObject {
         return nativeLayoutStatus.hasPrefix("未移动") || nativeLayoutStatus.hasPrefix("请先") ? nativeLayoutStatus : nil
     }
     var panelSize: CGSize {
-        let count = max(barEntries.count, settings ? shownEntries.count : 0)
-        let width = trusted ? min(720, max(settings || searching ? 400 : 260, CGFloat(count) * 44 + 68)) : 340
+        let contentWidth = max(stripWidth(barEntries), settings ? stripWidth(shownEntries) : 0)
+        let width = trusted ? min(720, max(settings || searching ? 400 : 260, contentWidth + 68)) : 340
         return CGSize(width: width, height: 52 + (settings && trusted ? 104 : 0) + (searching && trusted ? 44 : 0) + (feedback != nil ? 36 : 0))
+    }
+
+    func iconSize(_ entry: MenuEntry) -> CGSize {
+        // The image includes the original status window's padding. Keep its point size.
+        nativeIcons[entry.id]?.size ?? entry.frame?.size ?? CGSize(width: 24, height: 24)
+    }
+
+    func stripWidth(_ entries: [MenuEntry]) -> CGFloat {
+        entries.reduce(0) { $0 + max(20, iconSize($1).width) + 2 }
+    }
+
+    func refreshIcons() {
+        iconPermission = NativeIconCapture.permitted
+        guard iconPermission, !dragging, !capturingIcons else { return }
+        capturingIcons = true
+        let snapshot = entries
+        iconTask = Task { @MainActor [weak self] in
+            let images = await NativeIconCapture.capture(snapshot)
+            guard let self else { return }
+            if !self.dragging {
+                let live = Set(self.entries.map(\.id))
+                self.nativeIcons = self.nativeIcons.filter { live.contains($0.key) }
+                for (id, image) in images where live.contains(id) { self.nativeIcons[id] = image }
+            }
+            self.capturingIcons = false
+        }
+    }
+
+    func grantIconPermission() {
+        _ = CGRequestScreenCaptureAccess()
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
+    }
+
+    func showIconDiagnostics() {
+        let alert = NSAlert()
+        alert.messageText = "原始图标读取状态"
+        alert.informativeText = iconPermission
+            ? "已读取 \(nativeIcons.count) / \(entries.count) 个原始菜单栏图标。\n图像仅保存在内存中，不录音、不写入文件、不上传。"
+            : "请先允许叠栏读取原始菜单栏图标。"
+        alert.addButton(withTitle: "好")
+        alert.runModal()
     }
 
     func activate(_ entry: MenuEntry) {
@@ -70,25 +118,31 @@ final class AppModel: ObservableObject {
         if feedback != nil { nativeLayoutStatus = "" }
     }
 
-    func dragProvider(for entry: MenuEntry) -> NSItemProvider {
+    func beginDrag(_ entry: MenuEntry) -> Bool {
+        guard !applyingNativeLayout, !dragging, trusted else { return false }
         draggedEntry = entry
-        let provider = NSItemProvider()
-        provider.suggestedName = entry.name
-        provider.registerDataRepresentation(forTypeIdentifier: UTType.foldBarApplication.identifier, visibility: .ownProcess) { completion in
-            completion(Data(entry.id.utf8), nil)
-            return nil
-        }
-        return provider
+        dragging = true
+        onDragBegan(entry)
+        return true
+    }
+
+    func endDrag() {
+        onDragEnded()
+        dragging = false
+        draggedEntry = nil
     }
 
     func acceptDrop(_ providers: [NSItemProvider], before target: MenuEntry? = nil, hide: Bool = false) -> Bool {
-        guard !applyingNativeLayout, let snapshot = draggedEntry,
+        guard dragging, !applyingNativeLayout, let snapshot = draggedEntry,
               let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.foldBarApplication.identifier) }) else { return false }
         provider.loadDataRepresentation(forTypeIdentifier: UTType.foldBarApplication.identifier) { [weak self] data, _ in
             guard let data, data.count <= 4096, String(data: data, encoding: .utf8) == snapshot.id else { return }
             DispatchQueue.main.async {
                 guard let self, !self.applyingNativeLayout, snapshot.id != target?.id else { return }
-                if hide { self.onHideEntry(snapshot) }
+                if hide {
+                    guard self.isShown(snapshot) else { return }
+                    self.onHideEntry(snapshot)
+                }
                 else { self.onPlaceEntry(snapshot, target) }
             }
         }
@@ -96,7 +150,9 @@ final class AppModel: ObservableObject {
     }
 
     func refresh() {
+        guard !dragging else { return }
         trusted = AccessibilityService.trusted
+        iconPermission = NativeIconCapture.permitted
         dividerFrame = currentDivider()
         applications = AccessibilityService.applications()
         guard trusted else { entries = []; scanning = false; return }
@@ -105,10 +161,11 @@ final class AppModel: ObservableObject {
         service.scan(apps: applications) { [weak self] entries, _ in
             guard let self else { return }
             self.trusted = AccessibilityService.trusted
-            self.entries = self.trusted ? entries : []
+            if !self.dragging { self.entries = self.trusted ? entries : [] }
             self.dividerFrame = self.currentDivider()
             self.scanning = false
             self.lastScanned = Date()
+            self.refreshIcons()
         }
     }
 
